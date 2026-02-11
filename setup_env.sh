@@ -32,7 +32,12 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 
 # shellcheck disable=SC1090
-source "$(conda info --base)/etc/profile.d/conda.sh"
+CONDA_BASE="$(conda info --base)"
+# Convert Windows paths to POSIX for bash on Windows (Git Bash, MSYS2, etc.)
+if [[ "$CONDA_BASE" == *":\\"* ]] || [[ "$CONDA_BASE" == *"\\"* ]]; then
+  CONDA_BASE="$(cygpath "$CONDA_BASE")"
+fi
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
 
 echo "[INFO] Creating conda env: ${ENV_NAME} (python=${PY_VER})"
 
