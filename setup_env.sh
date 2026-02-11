@@ -16,9 +16,9 @@ cleanup_on_error() {
 trap cleanup_on_error EXIT
 
 # Usage:
-#   bash setup_conda.sh
-#   bash setup_conda.sh -n myenv
-#   bash setup_conda.sh -n myenv -p 3.12
+#   bash setup_env.sh
+#   bash setup_env.sh -n myenv
+#   bash setup_env.sh -n myenv -p 3.12
 
 
 ENV_NAME="evalplus-pipeline"
@@ -29,7 +29,7 @@ while getopts "n:p:h" opt; do
     n) ENV_NAME="${OPTARG}" ;;
     p) PY_VER="${OPTARG}" ;;
     h)
-      echo "Usage: bash setup_conda.sh [-n env_name] [-p python_version]"
+      echo "Usage: bash setup_env.sh [-n env_name] [-p python_version]"
       exit 0
       ;;
     *)
