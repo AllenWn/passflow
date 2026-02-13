@@ -3,7 +3,7 @@ import importlib.util
 import json
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from vllm import LLM, SamplingParams
 
@@ -55,6 +55,101 @@ def load_evalplus_problems(benchmark: str) -> Dict[str, Any]:
 
         return get_mbpp_plus()
     raise ValueError(f"Unsupported benchmark: {benchmark}. Use 'humaneval' or 'mbpp'.")
+
+
+def resolve_path(base_dir: str, maybe_path: Optional[str]) -> Optional[str]:
+    if not maybe_path:
+        return None
+    if os.path.isabs(maybe_path):
+        return maybe_path
+    return os.path.abspath(os.path.join(base_dir, maybe_path))
+
+
+def load_model_profiles(path: Optional[str]) -> Dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        return {}
+    return data.get("models", {}) if isinstance(data.get("models", {}), dict) else {}
+
+
+def infer_interface_with_tokenizer(model: str, trust_remote_code: bool) -> str:
+    """
+    Best-effort inference:
+      - if tokenizer has a non-empty chat_template -> "chat"
+      - else -> "completion"
+    """
+    try:
+        from transformers import AutoTokenizer  # type: ignore
+
+        tok = AutoTokenizer.from_pretrained(model, trust_remote_code=trust_remote_code)
+        chat_template = getattr(tok, "chat_template", None)
+        if isinstance(chat_template, str) and chat_template.strip():
+            return "chat"
+    except Exception:
+        pass
+    return "completion"
+
+
+def build_chat_prompt(
+    tokenizer: Any,
+    system_prompt: str,
+    user_content: str,
+    add_generation_prompt: bool = True,
+) -> str:
+    messages = []
+    if system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_content})
+
+    if not hasattr(tokenizer, "apply_chat_template"):
+        raise RuntimeError(
+            "Tokenizer does not support apply_chat_template(); cannot build chat prompt."
+        )
+    # Different tokenizers may or may not accept add_generation_prompt.
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt
+        )
+    except TypeError:
+        return tokenizer.apply_chat_template(messages, tokenize=False)
+
+
+def dump_prompt_debug(
+    outdir: str,
+    cfg: Dict[str, Any],
+    task_ids: List[str],
+    eval_prompts: List[str],
+    model_prompts: List[str],
+    chosen_interface: str,
+    prompt_mode: str,
+    enable_system_prompt: bool,
+    system_prompt_source: str,
+    sys_to_use: str,
+    n: int,
+) -> None:
+    path = os.path.join(outdir, "prompt_debug.txt")
+    n = max(0, min(int(n), len(task_ids)))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("== Prompt debug dump ==\n")
+        f.write(f"model: {cfg.get('model')}\n")
+        f.write(f"benchmark: {cfg.get('benchmark')}\n")
+        f.write(f"prompting.mode: {prompt_mode}\n")
+        f.write(f"chosen_interface: {chosen_interface}\n")
+        f.write(f"enable_system_prompt: {enable_system_prompt}\n")
+        f.write(f"system_prompt_source: {system_prompt_source}\n")
+        f.write("---- system_prompt (effective) ----\n")
+        f.write(sys_to_use + "\n")
+        f.write("---- samples ----\n")
+        for i in range(n):
+            f.write(f"\n## i={i} task_id={task_ids[i]}\n")
+            f.write("-- eval_prompt (benchmark) --\n")
+            f.write(eval_prompts[i] + "\n")
+            f.write("-- model_prompt (sent to model) --\n")
+            f.write(model_prompts[i] + "\n")
+    print(f"[DEBUG] Wrote prompt debug: {path}")
 
 
 def default_run_name(cfg: Dict[str, Any]) -> str:
@@ -126,6 +221,9 @@ def main():
     )
     args = ap.parse_args()
 
+    config_path_abs = os.path.abspath(args.config)
+    config_dir = os.path.dirname(config_path_abs)
+
     cfg_mod = load_config_module(args.config)
 
     if not hasattr(cfg_mod, "to_dict"):
@@ -178,13 +276,123 @@ def main():
 
     items = sorted_items(problems)[:limit]
     task_ids = [tid for tid, _ in items]
-    prompts = [prob["prompt"] for _, prob in items]
+    eval_prompts = [prob["prompt"] for _, prob in items]
+
+    # Prompting / interface selection
+    prompting_cfg = (
+        cfg.get("prompting", {}) if isinstance(cfg.get("prompting", {}), dict) else {}
+    )
+    prompt_mode = str(prompting_cfg.get("mode", "completion")).lower()
+    enable_system_prompt = bool(prompting_cfg.get("enable_system_prompt", True))
+    global_system_prompt = str(prompting_cfg.get("system_prompt", ""))
+    debug_prompting = bool(prompting_cfg.get("debug", False))
+    debug_n = int(prompting_cfg.get("debug_n", 1) or 1)
+    profiles_path = resolve_path(config_dir, prompting_cfg.get("model_profiles_path"))
+    if profiles_path and not os.path.exists(profiles_path):
+        print(f"[WARN] Model profiles path not found (ignored): {profiles_path}")
+        profiles_path = None
+    model_profiles = load_model_profiles(profiles_path)
+    profile = (
+        model_profiles.get(cfg["model"], {})
+        if isinstance(model_profiles.get(cfg["model"], {}), dict)
+        else {}
+    )
+    interface = str(profile.get("interface", "")).lower().strip()
+    per_model_system_prompt = str(
+        profile.get("system_prompt", "")
+        or profile.get("vendor_system_prompt", "")
+        or ""
+    )
+
+    vcfg = cfg["vllm"]
+    trust_remote_code = bool(vcfg.get("trust_remote_code", False))
+
+    if prompt_mode not in ("completion", "chat", "vendor_default", "auto"):
+        raise ValueError(
+            f"Unsupported prompting.mode: {prompt_mode}. Use completion/chat/vendor_default/auto."
+        )
+
+    if prompt_mode == "auto":
+        if interface in ("chat", "completion"):
+            chosen_interface = interface
+        else:
+            chosen_interface = infer_interface_with_tokenizer(
+                cfg["model"], trust_remote_code
+            )
+    elif prompt_mode == "completion":
+        chosen_interface = "completion"
+    else:
+        # chat or vendor_default
+        chosen_interface = "chat"
+
+    if enable_system_prompt:
+        system_prompt_source = (
+            "model_profiles.system_prompt"
+            if per_model_system_prompt.strip()
+            else "config.system_prompt"
+        )
+        sys_to_use = (
+            per_model_system_prompt
+            if per_model_system_prompt.strip()
+            else global_system_prompt
+        )
+    else:
+        system_prompt_source = "disabled"
+        sys_to_use = ""
+
+    # Build model prompts (may differ from eval prompts in chat mode).
+    model_prompts: List[str]
+    tokenizer = None
+    if chosen_interface == "completion":
+        if sys_to_use.strip():
+            prefix = sys_to_use.rstrip() + "\n\n"
+            model_prompts = [prefix + p for p in eval_prompts]
+        else:
+            model_prompts = list(eval_prompts)
+    else:
+        try:
+            from transformers import AutoTokenizer  # type: ignore
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                cfg["model"], trust_remote_code=trust_remote_code
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load tokenizer for chat prompting: {cfg['model']}. "
+                f"Install/verify transformers and model files. Original error: {e}"
+            ) from e
+
+        model_prompts = [
+            build_chat_prompt(tokenizer, sys_to_use, p, add_generation_prompt=True)
+            for p in eval_prompts
+        ]
+
+    if debug_prompting:
+        dump_prompt_debug(
+            outdir=outdir,
+            cfg=cfg,
+            task_ids=task_ids,
+            eval_prompts=eval_prompts,
+            model_prompts=model_prompts,
+            chosen_interface=chosen_interface,
+            prompt_mode=prompt_mode,
+            enable_system_prompt=enable_system_prompt,
+            system_prompt_source=system_prompt_source,
+            sys_to_use=sys_to_use,
+            n=debug_n,
+        )
 
     print(
-        f"[INFO] Config: benchmark={cfg['benchmark']} total={total} running={len(prompts)}"
+        f"[INFO] Config: benchmark={cfg['benchmark']} total={total} running={len(eval_prompts)}"
     )
     print(f"[INFO] Model: {cfg['model']}")
     print(f"[INFO] Pass mode: {cfg['pass_mode']}")
+    if profiles_path:
+        print(f"[INFO] Model profiles: {profiles_path}")
+    print(f"[INFO] Prompting mode: {prompt_mode} -> interface={chosen_interface}")
+    print(f"[INFO] System prompt enabled: {enable_system_prompt}")
+    if enable_system_prompt and sys_to_use.strip():
+        print(f"[INFO] System prompt source: {system_prompt_source}")
     print(f"[INFO] Output dir: {outdir}")
     print(f"[INFO] Will write: {samples_path}")
 
@@ -198,7 +406,6 @@ def main():
         return
 
     # Init vLLM engine
-    vcfg = cfg["vllm"]
     llm = LLM(
         model=cfg["model"],
         tensor_parallel_size=int(vcfg["tp"]),
@@ -222,15 +429,20 @@ def main():
 
     # Generate
     print("[INFO] Generating with vLLM...")
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(model_prompts, sampling_params)
 
     # Build samples.jsonl
-    # Use "solution" = prompt + completion for robustness.
+    # Use "solution" = benchmark_prompt + completion for robustness.
+    #
+    # IMPORTANT:
+    #   - In chat mode, the *model input* prompt includes chat wrappers/tokens.
+    #   - EvalPlus evaluation expects Python code starting from the benchmark prompt,
+    #     so we always prefix with the original benchmark prompt here.
     # For pass@k (n>1), write multiple lines per task_id (one per candidate).
     rows: List[Dict[str, Any]] = []
     for i, out in enumerate(outputs):
         tid = task_ids[i]
-        prompt = prompts[i]
+        prompt = eval_prompts[i]
         for cand in out.outputs:
             rows.append(
                 {
@@ -242,10 +454,10 @@ def main():
     write_jsonl(samples_path, rows)
 
     n = int(scfg["n"])
-    expected_lines = len(prompts) * n
+    expected_lines = len(eval_prompts) * n
     print(f"[OK] Wrote samples.jsonl: {samples_path}")
     print(
-        f"[INFO] Lines: {len(rows)} (expected {expected_lines} = tasks({len(prompts)}) * n({n}))"
+        f"[INFO] Lines: {len(rows)} (expected {expected_lines} = tasks({len(eval_prompts)}) * n({n}))"
     )
 
     print("\nNext step (evaluation):")

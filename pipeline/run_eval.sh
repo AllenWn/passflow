@@ -52,6 +52,13 @@ python3 run_generate.py --config "${CONFIG_PATH}"
 
 
 RUNCFG_PATH="${OUTDIR}/run_config.json"
+EVAL_CACHE_JSON="${OUTDIR}/samples_eval_results.json"
+
+if [[ -f "${EVAL_CACHE_JSON}" ]]; then
+  echo
+  echo "[INFO] Removing previous EvalPlus cache: ${EVAL_CACHE_JSON}"
+  rm -f "${EVAL_CACHE_JSON}"
+fi
 
 # run evaluation
 # normalize benchmark name for evalplus.evaluate positional argument

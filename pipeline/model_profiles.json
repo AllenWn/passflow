@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "description": "Per-model prompting metadata. Keep chat templates in the model tokenizer; record interface type and optional per-model system_prompt override here.",
+  "models": {
+    "codellama/CodeLlama-7b-hf": {
+      "interface": "completion"
+    },
+    "codellama/CodeLlama-7b-Python-hf": {
+      "interface": "completion"
+    },
+    "codellama/CodeLlama-7b-Instruct-hf": {
+      "interface": "chat"
+    },
+    "meta-llama/Llama-2-7b-hf": {
+      "interface": "completion"
+    },
+    "Qwen/Qwen2.5-Coder-7B-Instruct": {
+      "interface": "chat",
+      "system_prompt": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant"
+    }
+  }
+}

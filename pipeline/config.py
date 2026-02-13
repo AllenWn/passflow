@@ -10,7 +10,7 @@ BENCHMARK: str = "mbpp"
 #   - 164 for full HumanEval+
 #   - 974 for full MBPP+
 #   - 0   for full benchmark (auto)
-LIMIT: int = 974
+LIMIT: int = 0
 
 # models
 MODEL: str = "codellama/CodeLlama-7b-Instruct-hf"
@@ -56,6 +56,26 @@ TRUST_REMOTE_CODE: bool = False  # keep default safe
 # output / run naming
 RUNS_ROOT: str = "runs"
 RUN_NAME: str = ""
+
+# prompting / chat settings
+# prompting mode:
+#   - "completion": always use benchmark prompt as completion prefix (base models)
+#   - "chat": always wrap benchmark prompt into chat messages via tokenizer chat_template
+#   - "vendor_default": (legacy) same as chat; system prompt selection controlled by flags below
+#   - "auto": choose interface based on model_profiles.json (if present) else tokenizer.chat_template
+PROMPT_MODE: str = "auto"
+
+# system prompt control (applies to BOTH chat + completion inputs):
+#   - if disabled, no system prompt will be added anywhere
+#   - if enabled, prefer per-model override in model_profiles.json (models.<id>.system_prompt),
+#     otherwise fall back to SYSTEM_PROMPT below.
+ENABLE_SYSTEM_PROMPT: bool = True
+SYSTEM_PROMPT: str = "You are a useful coding assistant. Output only valid Python code."
+MODEL_PROFILES_PATH: str = "model_profiles.json"
+
+# debug: dump the effective prompts for inspection
+PROMPT_DEBUG: bool = False
+PROMPT_DEBUG_N: int = 1
 
 
 # batch run settings
@@ -112,5 +132,14 @@ def to_dict() -> dict:
     cfg["output"] = {
         "runs_root": RUNS_ROOT,
         "run_name": RUN_NAME,
+    }
+
+    cfg["prompting"] = {
+        "mode": PROMPT_MODE,
+        "enable_system_prompt": ENABLE_SYSTEM_PROMPT,
+        "system_prompt": SYSTEM_PROMPT,
+        "model_profiles_path": MODEL_PROFILES_PATH,
+        "debug": PROMPT_DEBUG,
+        "debug_n": PROMPT_DEBUG_N,
     }
     return cfg
