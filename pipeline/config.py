@@ -4,7 +4,7 @@ from typing import List, Optional
 # benchmark
 #   - "humaneval" -> HumanEval+
 #   - "mbpp"     -> MBPP+
-BENCHMARK: str = "mbpp"
+BENCHMARK: str = "humaneval"
 
 # tasks limit
 #   - 164 for full HumanEval+
